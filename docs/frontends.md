@@ -45,6 +45,7 @@ A built app carries the settings its game supports, as the iPhone app's settings
 - `default`: the value for this app's platform ([Tested defaults](settings.md#tested-defaults)), with profile defaults resolved for its game. A front end that keeps only the choices that differ from it lets a newer build's tested defaults reach the player, as the iPhone app does.
 - `base` (optional, render scale only): `{"docked": [w, h], "handheld": [w, h]}`, the 3D views' size that the scale multiplies, so a front end can show 0.75 as 1200×675 docked. It comes from the game's profile (`render_base`), and only some games have it.
 - `level` (optional): `basic` marks a setting to show first, for a front end that shows a short list and puts the rest behind a second step. Without it, the front end decides.
+- `open` (optional): the choice also takes values the front end lists when it runs, shown after its `options`. `audio-input` (the Microphone row, `DM_MIC_DEVICE`): the Mac's audio input devices, the value each device's UID (`kAudioDevicePropertyDeviceUID`) and the label its name. A front end that lists none shows the options alone; a saved value that is no option is still valid, and the host falls back when that device is not connected.
 - `needs` (optional): `<VAR>=<value>` makes the row a sub-setting of the row that sets `<VAR>`, drawn only while that row has that value (Rumble strength only while rumble is on). A row naming a variable the list does not have stays drawn.
 - An app without the file has no settings to offer: start it as it is.
 

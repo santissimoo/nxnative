@@ -781,9 +781,26 @@ static int mic_restart(const char *why) {
 static AudioQueueRef g_aq;       // changed only under g_mic_lock
 static _Atomic int g_aq_run;
 static dispatch_queue_t g_mic_q;
+// DM_MIC_GAIN=<factor> (the launcher's Microphone gain): the captured samples times the factor, saturated, before the streams' own gain. A hum into a laptop's microphone is quiet
+static void mic_scale(int16_t *pcm, int n, float gain) {   // tests call it directly
+    for (int i = 0; i < n; i++) { float v = (float)pcm[i] * gain; pcm[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v; }
+}
+static float mic_gain(void) {   // read once, on the capture's thread
+    static float g;
+    if (!g) {
+        const char *e = getenv("DM_MIC_GAIN"); float v = e && *e ? strtof(e, NULL) : 1;
+        g = v >= 0.25f && v <= 8 ? v : 1;
+        if (g != v) LOG("[RED] DM_MIC_GAIN=%s: a factor from 0.25 to 8; using 1", e);
+        else if (g != 1) LOG("microphone: gain %.2f (DM_MIC_GAIN)", g);
+    }
+    return g;
+}
+__attribute__((weak)) int dm_mic_access(void) { return 1; }   // 1 allowed, 0 not asked yet, -1 denied or restricted by macOS (TCC): front_mac.m's definition replaces this one, which the tests and iOS keep
 static void mic_aq_input(void *ud, AudioQueueRef q, AudioQueueBufferRef b, const AudioTimeStamp *t, UInt32 npk, const AudioStreamPacketDescription *d) {
     (void)ud; (void)t; (void)npk; (void)d;
     if (!atomic_load(&g_aq_run)) return;
+    float gain = mic_gain();
+    if (gain != 1) mic_scale(b->mAudioData, (int)(b->mAudioDataByteSize / 2), gain);
     is_feed(b->mAudioData, (int)(b->mAudioDataByteSize / 2));
     AudioQueueEnqueueBuffer(q, b, 0, NULL);
 }
@@ -857,9 +874,33 @@ static AudioDeviceID mic_builtin_input(void) {   // the built-in microphone: a b
     }
     return found;
 }
+static AudioDeviceID mic_input_by_uid(const char *want) {   // the device with input streams whose UID is want, or kAudioObjectUnknown
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = 0; AudioDeviceID devs[64];
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size)) return kAudioObjectUnknown;
+    if (size > sizeof devs) size = sizeof devs;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, devs)) return kAudioObjectUnknown;
+    AudioObjectPropertyAddress in = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain };
+    for (UInt32 i = 0; i < size / sizeof devs[0]; i++) {
+        UInt32 streams = 0; char u[256];
+        if (AudioObjectGetPropertyDataSize(devs[i], &in, 0, NULL, &streams) || !streams) continue;
+        CFStringRef uid = mic_string(devs[i], kAudioDevicePropertyDeviceUID); mic_cstr(uid, u, sizeof u, "");
+        if (uid) CFRelease(uid);
+        if (!strcmp(u, want)) return devs[i];
+    }
+    return kAudioObjectUnknown;
+}
+// DM_MIC_DEVICE=<UID> (the launcher's Microphone): the player's device is taken as it is, a Bluetooth headset too (the player chose its call-quality sound). A device that is not
+// connected now gives the automatic choice below, and the next device change looks for it again (mic_restart)
 // The device to capture: its name in dev, and in *uid the UID to set on the queue when it is not the default input (NULL: the default). Returns MIC_TAKE_*
 static int mic_choose(char *dev, size_t n, CFStringRef *uid) {
     *uid = NULL;
+    const char *want = getenv("DM_MIC_DEVICE");
+    if (want && *want && strcmp(want, "default")) {
+        AudioDeviceID chosen = mic_input_by_uid(want);
+        if (chosen != kAudioObjectUnknown) { mic_device_name(chosen, dev, n); *uid = mic_string(chosen, kAudioDevicePropertyDeviceUID); return MIC_TAKE_DEFAULT; }
+        LOG("microphone: DM_MIC_DEVICE=%s is not an input device connected now: choosing as without it", want);
+    }
     AudioDeviceID in_id = mic_default_device(kAudioHardwarePropertyDefaultInputDevice), out_id = mic_default_device(kAudioHardwarePropertyDefaultOutputDevice);
     CFStringRef in_uid = mic_string(in_id, kAudioDevicePropertyDeviceUID), out_uid = mic_string(out_id, kAudioDevicePropertyDeviceUID);
     char in_u[256], out_u[256]; mic_cstr(in_uid, in_u, sizeof in_u, ""); mic_cstr(out_uid, out_u, sizeof out_u, "");
@@ -922,6 +963,8 @@ static int mic_aq_start(void) {
         return -1;
     }
     LOG("microphone: capturing %s, 48 kHz mono", dev);
+    if (dm_mic_access() < 0)   // the queue runs all the same and gets silence, which looked like a game that does not listen
+        LOG("[RED] microphone: macOS denies this app the microphone, so the capture is silent: allow it in System Settings > Privacy & Security > Microphone, then start the game again");
     return 0;
 }
 static void mic_aq_stop(void) {

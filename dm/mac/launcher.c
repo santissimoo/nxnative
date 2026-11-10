@@ -89,6 +89,7 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
 
 static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) {   // a saved choice this build still offers: one of its values, or a number in its range
     CFTypeRef values = CFDictionaryGetValue(rule, CFSTR("values"));
+    if (CFDictionaryGetValue(rule, CFSTR("open")) == kCFBooleanTrue) return *s != 0;   // an open choice (a device's UID): the host decides, and falls back when the device is gone
     if (values && CFGetTypeID(values) == CFArrayGetTypeID()) {
         for (CFIndex i = 0; i < CFArrayGetCount(values); i++) {
             CFTypeRef o = CFArrayGetValueAtIndex(values, i);

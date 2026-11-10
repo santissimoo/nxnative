@@ -16,6 +16,7 @@ SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows onl
 # docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
 META = {
     'level': r'basic',                       # a setting a front end shows first; without it, the front end decides
+    'open': r'audio-input',                  # a choice that also takes values the front end lists when it runs: audio-input, the Mac's input devices (value: the device's UID)
     'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
 }
 

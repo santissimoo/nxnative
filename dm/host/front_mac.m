@@ -10,6 +10,7 @@
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
+#import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
@@ -1726,4 +1727,10 @@ void front_gpu_lost(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), tell);
         [win toggleFullScreen:nil];
     });
+}
+
+// hle_audio.c: what macOS (TCC) says about the microphone for this app: 1 allowed, 0 not asked yet (the capture's first start asks), -1 denied or restricted
+int dm_mic_access(void) {
+    AVAuthorizationStatus st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    return st == AVAuthorizationStatusAuthorized ? 1 : st == AVAuthorizationStatusNotDetermined ? 0 : -1;
 }

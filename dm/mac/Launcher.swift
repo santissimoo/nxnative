@@ -5,6 +5,8 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import AVFoundation
+import CoreAudio
 import QuartzCore
 import SwiftUI
 
@@ -36,6 +38,7 @@ struct LauncherView: View {
                 }
                 if advanced {
                     settingSections(basic: false)
+                    if m.settings.contains(where: { $0.open == "audio-input" }) { MicrophoneTestSection(m: m) }
                     Section {
                         Button("Reset to tested defaults") { m.reset() }
                             .disabled(!m.changed)
@@ -160,6 +163,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     func finish(_ play: Bool) {
         guard let w = window else { return }
+        MicrophoneTest.shared.stop()   // this process lives on while the game runs: the microphone is the game's from here
         window = nil; self.play = play
         // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
@@ -178,6 +182,100 @@ enum LauncherWindowLayout {
     }
 }
 
+/// The launcher's microphone test: captures the chosen device while the player watches its level, so a wrong device, a muted one or a refused permission shows before the game
+/// starts. Nothing is captured until the player asks (macOS asks for microphone access at the first capture), and the capture ends with Stop, a new choice or Play.
+final class MicrophoneTest: ObservableObject {
+    static let shared = MicrophoneTest()
+    static let denied = "macOS does not let this app use the microphone. Allow it in System Settings › Privacy & Security › Microphone."
+    @Published var level = 0.0   // 0 to 1: -60 dB to 0 dB, with the gain
+    @Published var message = ""
+    @Published var running = false
+    private var session: AVCaptureSession?
+    private var timer: Timer?
+
+    /// A level in dB (a channel's average power) with a gain factor, as the meter's 0 to 1
+    static func meter(db: Double, gain: Double) -> Double { Swift.max(0, Swift.min(1, (db + 20 * log10(Swift.max(gain, 0.01)) + 60) / 60)) }
+
+    func start(uid: String, gain: @escaping () -> Double) {
+        stop()
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .denied, .restricted: message = Self.denied; return
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { ok in DispatchQueue.main.async { if ok { self.start(uid: uid, gain: gain) } else { self.message = Self.denied } } }
+            return
+        default: break
+        }
+        guard let dev = uid == "default" ? AVCaptureDevice.default(for: .audio) : AVCaptureDevice(uniqueID: uid), let input = try? AVCaptureDeviceInput(device: dev) else {
+            message = "This microphone is not connected."; return
+        }
+        let s = AVCaptureSession(), out = AVCaptureAudioDataOutput()
+        guard s.canAddInput(input), s.canAddOutput(out) else { message = "This microphone cannot be opened."; return }
+        s.addInput(input); s.addOutput(out); s.startRunning()
+        session = s; running = true; message = "Listening to \(dev.localizedName)"
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            let db = out.connections.first?.audioChannels.map { Double($0.averagePowerLevel) }.max() ?? -160
+            self?.level = Self.meter(db: db, gain: gain())
+        }
+        RunLoop.main.add(t, forMode: .common); timer = t
+    }
+    func stop() {
+        timer?.invalidate(); timer = nil
+        session?.stopRunning(); session = nil
+        if running { running = false; level = 0; message = "" }
+    }
+}
+
+struct MicrophoneTestSection: View {
+    @ObservedObject var m: LauncherModel
+    @ObservedObject private var test = MicrophoneTest.shared
+    private var device: String { m.values["DM_MIC_DEVICE"] ?? "default" }
+
+    var body: some View {
+        Section {
+            HStack(spacing: 12) {
+                Button(test.running ? "Stop" : "Test microphone") {
+                    if test.running { test.stop() } else { let model = m; test.start(uid: device) { Double(model.values["DM_MIC_GAIN"] ?? "1") ?? 1 } }
+                }
+                ProgressView(value: test.level).accessibilityLabel("Microphone level")
+            }
+            .onChange(of: device) { _, _ in test.stop() }
+        } footer: {
+            Text(test.message.isEmpty ? "Shows the level of the microphone chosen above, with its gain." : test.message)
+        }
+    }
+}
+
+/// The Mac's audio input devices as choice options, [UID, name], for a setting with open "audio-input" (DM_MIC_DEVICE, which hle_audio.c matches by UID)
+func audioInputOptions() -> [[String]] {
+    func text(_ dev: AudioDeviceID, _ sel: AudioObjectPropertySelector) -> String? {
+        var a = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var v: Unmanaged<CFString>?; var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &v) == noErr, let s = v else { return nil }
+        return s.takeRetainedValue() as String
+    }
+    var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size) == noErr else { return [] }
+    var devs = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &devs) == noErr else { return [] }
+    var streams = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+    return devs.compactMap { dev in
+        var n: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(dev, &streams, 0, nil, &n) == noErr, n > 0, let uid = text(dev, kAudioDevicePropertyDeviceUID), !uid.isEmpty else { return nil }
+        return [uid, text(dev, kAudioObjectPropertyName) ?? uid]
+    }
+}
+/// The list with each open choice's run-time options added after its own. A saved device that is not connected stays in the list, so the choice is kept until it returns
+func withRunTimeOptions(_ settings: [Setting], saved: (String) -> String?, inputs: [[String]]) -> [Setting] {
+    settings.map { s in
+        guard s.open == "audio-input" else { return s }
+        var t = s, opts = (s.options ?? []) + inputs.filter { d in !(s.options ?? []).contains { $0[0] == d[0] } }
+        if let v = saved(s.env), !v.isEmpty, !opts.contains(where: { $0[0] == v }) { opts.append([v, "Not connected"]) }
+        t.options = opts
+        return t
+    }
+}
+
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
 public func dmMacLauncher() -> Int32 {
@@ -187,7 +285,7 @@ public func dmMacLauncher() -> Int32 {
         fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
         return 2
     }
-    let model = LauncherModel(file.settings)
+    let model = LauncherModel(withRunTimeOptions(file.settings, saved: { UserDefaults.standard.object(forKey: "launcher." + $0) as? String }, inputs: audioInputOptions()))
     let app = NSApplication.shared, launcher = Launcher(model)
     app.setActivationPolicy(.regular)
     app.delegate = launcher

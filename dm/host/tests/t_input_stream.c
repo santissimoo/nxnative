@@ -163,6 +163,8 @@ int main(void) {
     const uint32_t BT = kAudioDeviceTransportTypeBluetooth, BLE = kAudioDeviceTransportTypeBluetoothLE, USB = kAudioDeviceTransportTypeUSB, BUILTIN = kAudioDeviceTransportTypeBuiltIn;
     mic_dev pods = {71, BT, "AC-90-85-00-00-01:input"}, pods_out = {72, BT, "AC-90-85-00-00-01:output"}, other_out = {73, BT, "AC-90-85-00-00-02:output"},
             same = {71, BLE, ""}, speakers = {80, BUILTIN, "BuiltInSpeakerDevice"}, usb = {90, USB, "usb-mic"};
+    { int16_t g[4] = {1000, -1000, 30000, -30000}; mic_scale(g, 4, 2.0f);
+      if (g[0] != 2000 || g[1] != -2000 || g[2] != 32767 || g[3] != -32768) FAIL("gain 2: doubled and saturated samples expected"); }
     if (mic_pick(&pods, &pods, 1) != MIC_TAKE_BUILTIN) FAIL("AirPods as input and output (one device): the built-in microphone expected");
     if (mic_pick(&pods, &pods_out, 1) != MIC_TAKE_BUILTIN) FAIL("AirPods as input and output (two devices, one address): the built-in microphone expected");
     if (mic_pick(&same, &same, 1) != MIC_TAKE_BUILTIN) FAIL("a Bluetooth LE device as input and output: the built-in microphone expected");
